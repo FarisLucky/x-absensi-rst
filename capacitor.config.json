@@ -1,0 +1,34 @@
+{
+    "appId": "com.absensi.cki",
+    "appName": "Timesheet CKI",
+    "webDir": "dist",
+    "plugins": {
+        "SplashScreen": {
+            "launchShowDuration": 1300,
+            "launchAutoHide": true,
+            "backgroundColor": "#ffffffff",
+            "androidSplashResourceName": "splash",
+            "androidScaleType": "CENTER_CROP",
+            "showSpinner": true,
+            "androidSpinnerStyle": "large",
+            "iosSpinnerStyle": "small",
+            "spinnerColor": "#999999",
+            "splashFullScreen": true,
+            "splashImmersive": true,
+            "layoutName": "launch_screen",
+            "useDialog": false
+        },
+        "Geolocation": {
+            "locationAlwaysAndWhenInUseUsage": "Allow access to location",
+            "locationAlwaysUsage": "Allow access to location",
+            "locationWhenInUseUsage": "Allow access to location"
+        }
+    },
+    "android": {
+        "webContentsDebuggingEnabled": false,
+        "allowMixedContent": false,
+        "webView": {
+            "scrollEnabled": false
+        }
+    }
+}
