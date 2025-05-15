@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Jadwal;
+use App\Models\LokasiKaryawan;
 use App\Models\MKaryawan;
 use App\Models\MLokasi;
 use App\Models\Presensi;
@@ -11,8 +12,6 @@ use App\Models\PresensiUser;
 use Exception;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Log;
-use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 class PresensiService
 {
@@ -62,28 +61,43 @@ class PresensiService
 
             DB::beginTransaction();
             $jadwal = Jadwal::find($input['id_jadwal']);
+            
+            if ($jadwal->jam_bebas < 1 || is_null($jadwal->jam_bebas)) {
+                $masuk = Carbon::createFromFormat('Y-m-d H:i', "{$jadwal->tanggal} {$jadwal->jam_masuk}");
+                $pulang = Carbon::createFromFormat('Y-m-d H:i',  "{$jadwal->tanggal} {$jadwal->jam_pulang}");
+                $masuk->subMinutes(intval($jadwal->mulai_absen));
+                $mulai = $masuk->copy()->subMinutes(intval($jadwal->mulai_absen));
+            }
 
-            $mulai = Carbon::createFromFormat('Y-m-d H:i', "{$jadwal->tanggal} {$jadwal->jam_masuk}");
-            $pulang = Carbon::createFromFormat('Y-m-d H:i',  "{$jadwal->tanggal} {$jadwal->jam_pulang}");
-            $mulai->subMinutes(intval($jadwal->mulai_absen));
-
+            if (is_null($jadwal->jam_bebas) && ($jadwal->jam_masuk > $jadwal->jam_pulang)) {
+                $pulang->addDay();
+            }
             /**
              *  CEK PRESENSI SEBELUM JADWAL
              */
-            if ($now->lessThan($mulai)) {
-                throw new Exception("Absen dapat dilakukan {$jadwal->mulai_absen} sebelum jadwal");
-            } else if ($now->greaterThan($pulang)) {
-                throw new Exception("Gagal! Absen dapat dilakukan pada {$jadwal->jam_masuk} - {$jadwal->jam_pulang}");
+            if ($jadwal->jam_bebas < 1 || is_null($jadwal->jam_bebas)) {
+                if ($now->lessThan($mulai)) {
+                    throw new Exception("Absen dapat dilakukan {$jadwal->mulai_absen} sebelum jadwal");
+                } else if ($masuk->greaterThan($pulang) && $now->greaterThan($pulang->copy()->addDay())) {
+                    /**
+                     * JIKA SHIFT MALAM, MAKA TAMBAHKAN HARI UNTUK CEK JADWAL PULANG
+                     */
+                    throw new Exception("Absen melebihi jadwal! Shift: {$jadwal->kode_shift} ({$jadwal->jam_masuk} - {$jadwal->jam_pulang})");
+                } else if ($now->greaterThan($pulang)) {
+                    throw new Exception("Absen melebihi jadwal! Shift: {$jadwal->kode_shift} ({$jadwal->jam_masuk} - {$jadwal->jam_pulang})");
+                }
             }
-
             $presensiPayload = $input['presensi'];
             $presensiPayload['ip'] = request()->ip();
             $presensiPayload['latlng_masuk'] = $input['latlng_masuk'];
             $presensiPayload['lok_masuk'] = $input['lok_masuk']['nama'];
             Presensi::create($presensiPayload);
-
-            $telat = Carbon::createFromFormat('Y-m-d H:i', "{$jadwal->tanggal} {$jadwal->jam_masuk}")
+            
+            $telat = null;
+            if($jadwal->jam_bebas < 1 || is_null($jadwal->jam_bebas)) {
+                $telat = Carbon::createFromFormat('Y-m-d H:i', "{$jadwal->tanggal} {$jadwal->jam_masuk}")
                 ->addMinutes(intval($jadwal->telat_masuk) + 1);
+            }
             /**
              *  UPDATE PRESENSI JADWAL
              */
@@ -93,16 +107,18 @@ class PresensiService
             /**
              * CEK KETERLAMBATAN (LEBIH)
              */
-            if ($now->greaterThan($telat->format('Y-m-d H:i'))) {
-                $payload = [
-                    'id_jadwal' => $input['id_jadwal'],
-                    'jenis' => Jadwal::PRESEN_TELAT,
-                    'ket' => '-',
-                ];
-                $jadwal->ttltelat = $now->diffInMinutes($telat);
-                $jadwal->status_absen = Jadwal::PRESEN_TELAT;
+            if (($jadwal->jam_bebas < 1 || is_null($jadwal->jam_bebas)) && !is_null($telat)) {
+                if($now->greaterThan($telat->format('Y-m-d H:i'))) {
+                    $payload = [
+                        'id_jadwal' => $input['id_jadwal'],
+                        'jenis' => Jadwal::PRESEN_TELAT,
+                        'ket' => '-',
+                    ];
+                    $jadwal->ttltelat = $now->diffInMinutes($telat);
+                    $jadwal->status_absen = Jadwal::PRESEN_TELAT;
 
-                PresensiTerlambat::create($payload);
+                    PresensiTerlambat::create($payload);
+                }
             } else {
 
                 $jadwal->status_absen = Jadwal::PRESEN_TEPAT;
@@ -119,7 +135,7 @@ class PresensiService
 
             DB::commit();
 
-            return $jadwal;
+            return $jadwal->load('presensiTerlambat');
         } catch (\Throwable $th) {
             DB::rollBack();
             throw $th;
@@ -136,7 +152,9 @@ class PresensiService
             $jadwal = Jadwal::find($input['id_jadwal']);
 
 
-            $beforePulang = Carbon::createFromFormat('Y-m-d H:i',  "{$jadwal->tanggal}{$jadwal->jam_pulang}");
+            if ($jadwal->jam_bebas < 1 || is_null($jadwal->jam_bebas)) {
+                $beforePulang = Carbon::createFromFormat('Y-m-d H:i',  "{$jadwal->tanggal}{$jadwal->jam_pulang}");
+            }
 
             if (is_null($jadwal->masuk)) {
                 throw new Exception("Belum presensi masuk");
@@ -145,31 +163,39 @@ class PresensiService
             /**
              *  CEK PRESENSI SEBELUM JADWAL
              */
-            $masuk = Carbon::createFromFormat('Y-m-d H:i',  "{$jadwal->tanggal} {$jadwal->jam_masuk}");
-            if ($masuk->greaterThan($beforePulang)) {
-                $beforePulang->addDay();
+             
+            if ($jadwal->jam_bebas < 1 || is_null($jadwal->jam_bebas)) {
+                $masuk = Carbon::createFromFormat('Y-m-d H:i',  "{$jadwal->tanggal} {$jadwal->jam_masuk}");
+                if ($masuk->greaterThan($beforePulang)) {
+                    $beforePulang->addDay();
+                }
             }
 
-            if ($now->lessThan($beforePulang)) {
+            if ($now->lessThan($beforePulang) && ($jadwal->jam_bebas < 1 || is_null($jadwal->jam_bebas))) {
                 throw new Exception("Absen pulang dilakukan {$beforePulang->format('d-m-Y H:i')}");
             }
 
-            $telat = Carbon::createFromFormat('Y-m-d H:i', $jadwal->tanggal . " {$jadwal->jam_pulang}")
-                ->addMinutes($jadwal->telat_pulang);
+            $telat=null;
+            if ($jadwal->jam_bebas < 1 || is_null($jadwal->jam_bebas)) {
+                $telat = Carbon::createFromFormat('Y-m-d H:i', $jadwal->tanggal . " {$jadwal->jam_pulang}")
+                    ->addMinutes($jadwal->telat_pulang);
+            }
 
             /**
              * CEK KETERLAMBATAN
              */
             $ttlKerja = 0;
-            if ($now->greaterThan($telat)) {
-                $ttlKerja = $masuk->diffInMinutes($beforePulang);
-
-                $payload = [
-                    'id_jadwal' => $jadwal->id,
-                    'jenis' => 'PULANG',
-                ];
-
-                PresensiTerlambat::create($payload);
+            if (!is_null($telat) && ($jadwal->jam_bebas < 1 || is_null($jadwal->jam_bebas))) {
+                if($now->greaterThan($telat)) {
+                    $ttlKerja = $masuk->diffInMinutes($beforePulang);
+    
+                    $payload = [
+                        'id_jadwal' => $jadwal->id,
+                        'jenis' => 'PULANG',
+                    ];
+    
+                    PresensiTerlambat::create($payload);
+                }
             } else {
                 $ttlKerja = $masuk->diffInMinutes($now);
             }
@@ -272,7 +298,7 @@ class PresensiService
                 'jadwal.ttltelat',
                 'jadwal.ttlkerja',
                 'izin.kode_izin',
-                'presensi_terlambat.ket',
+                'presensi_terlambat.ket'
             )
             ->where('jadwal.nip', $nip)
             ->when($params['type'] === 'id', function ($query) use ($params) {
@@ -281,12 +307,13 @@ class PresensiService
                 $query->where('jadwal.tanggal', $params['val'])
                     ->where('jadwal.nip', $nip);
             })
+            ->groupBy('jadwal.id')
             ->orderByDesc('jadwal.created_at')
             ->first();
 
         if (!is_null($presensiUser)) {
             $presensiUser->tanggal_cast = Carbon::createFromFormat('Y-m-d', $presensiUser->tanggal)->format('d-m-Y');
-            $presensiUser->mulai_absen_cast = Carbon::createFromFormat('H:i', $presensiUser->jam_masuk)->subMinutes($presensiUser->mulai_absen)->format('H:i');
+            $presensiUser->mulai_absen_cast =!is_null($presensiUser->jam_masuk) ? Carbon::createFromFormat('H:i', $presensiUser->jam_masuk)->subMinutes($presensiUser->mulai_absen)->format('H:i') : $presensiUser->mulai_absen;
         }
 
         return $presensiUser;
@@ -364,10 +391,30 @@ class PresensiService
 
     public function checkRadius(array $params)
     {
-        $resp = null;
+        $resp = [
+            'lokasi' => null,
+            'needKoordinat' => true
+        ];
 
-        $lokasi = MLokasi::where('status', Mlokasi::AKTIF)->get();
+        $lokasi = LokasiKaryawan::leftJoin('m_lokasi', 'm_lokasi.id', '=', 'lokasi_karyawan.id_lokasi')
+            ->where('nip', $params['nip'])
+            ->get([
+                'lokasi_karyawan.id_lokasi',
+                'lokasi_karyawan.nip',
+                'm_lokasi.nama',
+                'm_lokasi.latitude',
+                'm_lokasi.longitude',
+                'm_lokasi.radius'
+            ]);
+        // $lokasi = MLokasi::where('status', Mlokasi::AKTIF)->get();
         foreach ($lokasi as $lok) {
+            if ($lok->latitude === null || $lok->longitude === null) {
+                $resp = [
+                    'lokasi' => $lok,
+                    'needKoordinat' => false
+                ];
+                continue;
+            }
             $radiusParams = [
                 "lokasiLat" => $lok->latitude,
                 "lokasiLong" => $lok->longitude,
@@ -382,13 +429,16 @@ class PresensiService
                 // throw new Exception('Anda diluar jangkauan');
             }
 
-            $resp = $lok;
+            $resp = [
+                'lokasi' => $lok,
+                'needKoordinat' => true,
+            ];
             break;
         }
 
-        if (is_null($resp)) {
-            throw new Exception('Anda diluar jangkauan');
-        }
+        // if (is_null($resp['lokasi'])) {
+        //     throw new Exception($resp);
+        // }
 
         return $resp;
     }
